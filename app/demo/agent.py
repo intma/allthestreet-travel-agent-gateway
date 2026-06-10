@@ -156,20 +156,48 @@ def _offer_dicts(spot: Spot, lang: str = "ko") -> list[dict[str, Any]]:
 
 
 def _spots_in_answer_order(answer: str, collected: dict[int, dict]) -> list[dict[str, Any]]:
-    """Return only the spots the answer actually references, in the order they
-    appear in the answer. We match the /ucp/spot/{id} and /p/{id} URLs that the
-    model includes in its text. Falls back to all collected spots if the answer
-    contains no recognizable spot links (so we never show an empty card row)."""
+    """Return only the spots the answer actually recommends, in answer order.
+
+    Hybrid matching, because Gemini doesn't always include our /p|/ucp links:
+      1) link match  — /ucp/spot/{id} or /p/{id} URLs in the answer
+      2) name match  — the spot's name appearing in the answer text
+    Each matched spot is keyed by its FIRST position in the answer, then we
+    sort by position. Falls back to all collected spots only if nothing
+    matches at all (never an empty card row)."""
     import re
-    ids_in_order: list[int] = []
-    for m in re.finditer(r"/(?:ucp/spot|p)/(\d+)", answer or ""):
+    text = answer or ""
+    pos_by_id: dict[int, int] = {}
+
+    def _norm(s: str) -> str:
+        return re.sub(r"[^0-9a-z\uac00-\ud7a3]+", "", (s or "").lower())
+
+    norm_text = _norm(text)
+
+    # 1) explicit links to our pages (position converted into normalized
+    #    coordinates so it sorts consistently with name matches below)
+    for m in re.finditer(r"/(?:ucp/spot|p)/(\d+)", text):
         sid = int(m.group(1))
-        if sid not in ids_in_order:
-            ids_in_order.append(sid)
-    if not ids_in_order:
+        if sid in collected and sid not in pos_by_id:
+            pos_by_id[sid] = len(_norm(text[: m.start()]))
+
+    # 2) spot names mentioned in the text, compared on the normalized form so
+    #    "SPA & WATERPARK" matches "SPA&WATERPARK" and "Blueline Park
+    #    (Cheongsapo)" matches "bluelinepark Cheongsapo". Skip very short
+    #    normalized names to avoid accidental substring hits.
+    for sid, summary in collected.items():
+        if sid in pos_by_id:
+            continue
+        norm_name = _norm(summary.get("name") or "")
+        if len(norm_name) < 5:
+            continue
+        idx = norm_text.find(norm_name)
+        if idx >= 0:
+            pos_by_id[sid] = idx
+
+    if not pos_by_id:
         return list(collected.values())
-    ordered = [collected[sid] for sid in ids_in_order if sid in collected]
-    return ordered or list(collected.values())
+    ordered_ids = sorted(pos_by_id, key=pos_by_id.get)
+    return [collected[sid] for sid in ordered_ids]
 
 
 async def _run_tool(name: str, args: dict[str, Any], collected: dict[int, dict],
@@ -235,7 +263,9 @@ async def run_demo_agent(question: str, lang: str = "ko") -> dict[str, Any]:
                 "Reply in the same language as the user's question.")
     system_instruction = (
         "너는 AllTheStreet 여행 가이드 에이전트다. 제공된 도구(search_spots, "
-        "get_spot_detail)로 장소·티켓 정보를 찾아 추천한다. " + lang_directive
+        "get_spot_detail)로 장소·티켓 정보를 찾아 추천한다. 추천하는 각 장소에는 "
+        "도구 결과의 page_url 링크를 본문에 반드시 포함해라(마크다운 링크). "
+        + lang_directive
     )
     config = types.GenerateContentConfig(
         system_instruction=system_instruction,

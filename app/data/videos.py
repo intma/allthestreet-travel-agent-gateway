@@ -168,7 +168,13 @@ class VideoIndex:
 
     async def get(self, spot_id: int, per_lang: bool = True) -> list[VideoRef]:
         if not self._fresh():
-            await self.build()
+            if self._index:
+                # Stale-while-revalidate: serve the old index now, rebuild in
+                # the background (the lock in build() prevents duplicates).
+                import asyncio as _aio
+                _aio.create_task(self.build())
+            else:
+                await self.build()
         refs = self._index.get(spot_id, [])
         if not per_lang:
             return refs

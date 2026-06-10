@@ -252,9 +252,17 @@ class SpotRepository:
                 _SPOT_INDEX_BUILDING = False
 
     async def _ensure_spot_index(self) -> dict[int, Spot]:
-        """Return the cache, rebuilding only if empty or past TTL (12h)."""
+        """Return the cache. Empty -> build synchronously (first ever call).
+        Expired but present -> serve the stale index IMMEDIATELY and refresh in
+        the background (stale-while-revalidate), so TTL expiry never makes a
+        user request wait for a ~10k-row rebuild."""
+        import asyncio as _aio
         import time as _t
-        if _SPOT_INDEX and (_t.time() - _SPOT_INDEX_AT) < _SPOT_INDEX_TTL:
+        if _SPOT_INDEX:
+            if (_t.time() - _SPOT_INDEX_AT) >= _SPOT_INDEX_TTL:
+                # Expired: kick off a background rebuild (the asyncio.Lock inside
+                # build_spot_index prevents duplicate concurrent builds).
+                _aio.create_task(self.build_spot_index(force=True))
             return _SPOT_INDEX
         return await self.build_spot_index()
 
